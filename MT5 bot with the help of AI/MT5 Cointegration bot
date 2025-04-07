@@ -1,0 +1,146 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import time
+from statsmodels.tsa.stattools import adfuller
+import io # Import the io module
+
+# Load historical data from Google Sheet
+url = "https://docs.google.com/spreadsheets/d/1kq9kMYoIQDyWGjmMYHdTWxobyAtVwyjrzNlscGusFw0/export?format=csv"
+data = pd.read_csv(url)
+data['Date'] = pd.to_datetime(data['Date'])
+data.set_index('Date', inplace=True)
+
+# Statistical Arbitrage: Identify Cointegrated Pair (AAPL vs SPY as proxy)
+spy_url = "https://docs.google.com/spreadsheets/d/16Gtg7MhiuFQGHBAsF8MT2YmPm0eeQA8bBGkjcorerso/export?format=csv&gid=0"  # Replace with actual SPY data source
+#spy_data = pd.read_csv(spy_url)
+
+# The following lines are for fixing potential issues with the spy_data source.
+import requests
+response = requests.get(spy_url)
+response.raise_for_status()  # Check for bad responses (4xx or 5xx)
+spy_data = pd.read_csv(io.StringIO(response.text))
+
+# Assuming the date column is named "Date", if not, adjust accordingly.
+spy_data['Date'] = pd.to_datetime(spy_data['Date'])
+spy_data.set_index('Date', inplace=True)
+data['SPY'] = spy_data['Close']
+
+def check_cointegration(stock1, stock2):
+    spread = stock1 - stock2
+    p_value = adfuller(spread.dropna())[1]  # ADF test
+    return p_value < 0.2  # Cointegration if p-value < 0.05
+
+if check_cointegration(data['Close'], data['SPY']):
+    print("AAPL and SPY are cointegrated. Proceeding with Stat Arb strategy.")
+else:
+    print("No cointegration detected. Strategy not applied.")
+
+# Compute Z-score for mean-reversion trading
+spread = data['Close'] - data['SPY']
+z_score = (spread - spread.mean()) / spread.std()
+
+# Define execution parameters
+X0 = 100_000  # Initial shares to buy
+remaining_shares = X0
+T = len(data)  # Total trading days from historical data
+eta = 0.01  # Temporary market impact
+gamma = 0.0001  # Permanent market impact
+max_slippage = 0.02  # Maximum acceptable slippage (2%)
+max_price_spike = 0.1  # Stop execution if price spikes 5%
+starting_price = None
+
+# Market Making Parameters
+spread_threshold = 0.1  # 10% spread threshold for market making
+inventory = 0  # Initial inventory level
+inventory_limit = 5_000  # Maximum inventory allowed
+
+# Track execution data
+executed_shares = []
+execution_prices = []
+dates = []
+costs = []
+market_making_trades = []
+
+# Almgren-Chriss Execution Loop with Stat Arb & Market Making
+for t, (date, row) in enumerate(data.iterrows()):
+    price = row['Close']
+
+    if starting_price is None:
+        starting_price = price  # Store initial price for tracking
+
+    # Risk management: Stop if price spikes too much
+    if price > starting_price * (1 + max_price_spike):
+        print(f"Execution halted on {date}: Price spiked beyond {max_price_spike * 100}% threshold")
+        break
+
+    # Market Making: Place bid & ask orders
+    bid_price = price * (1 - spread_threshold)
+    ask_price = price * (1 + spread_threshold)
+
+    # Simulated market orders arriving randomly
+    market_order_side = np.random.choice(['buy', 'sell'], p=[0.5, 0.5])
+    market_order_size = np.random.randint(500, 2000)
+
+    if market_order_side == 'buy' and inventory < inventory_limit:
+        inventory += market_order_size
+        market_making_trades.append((date, 'BUY', bid_price, market_order_size))
+    elif market_order_side == 'sell' and inventory > -inventory_limit:
+        inventory -= market_order_size
+        market_making_trades.append((date, 'SELL', ask_price, market_order_size))
+
+    # Stat Arb Buy Signal: Buy when Z-score < -2
+    if z_score.iloc[t] > -2:
+        continue  # Skip execution if no buy signal
+
+    # Compute execution quantity
+    execution_rate = 0.9  # Can dynamically change using ML
+    shares_to_execute = remaining_shares * (1 - execution_rate)
+    execution_price = price + gamma * shares_to_execute  # Adjust for market impact
+
+    # Slippage control: Stop order if slippage exceeds limit
+    if abs(execution_price - price) / price > max_slippage:
+        print(f"Skipping execution on {date} at {price:.2f} due to high slippage")
+        continue
+
+    # Track execution
+    executed_shares.append(shares_to_execute)
+    execution_prices.append(execution_price)
+    dates.append(date)
+    costs.append(shares_to_execute * execution_price)
+    print(f"Executed {shares_to_execute:.0f} shares at {execution_price:.2f} on {date}")
+
+    # Update remaining shares
+    remaining_shares -= shares_to_execute
+    if remaining_shares <= 0:
+        break
+
+    # Simulate real-time execution delay
+    time.sleep(0.1)
+
+# Calculate total cost and average execution price
+total_cost = sum(costs)
+avg_execution_price = total_cost / sum(executed_shares) if executed_shares else 0
+market_avg_price = data['Close'][:len(execution_prices)].mean()
+
+# Visualization: Execution Price vs Market Price
+plt.figure(figsize=(12, 6))
+plt.plot(data.index[:len(execution_prices)], data['Close'][:len(execution_prices)], label='Market Price', linestyle='dashed')
+plt.scatter(dates, execution_prices, color='green', label='Execution Price')
+plt.xlabel('Date')
+plt.ylabel('Price')
+plt.title('Buy-Side Almgren-Chriss Execution with Statistical Arbitrage & Market Making')
+plt.legend()
+plt.show()
+
+# Print execution analytics
+print(f"Total Shares Bought: {sum(executed_shares):,.0f}")
+print(f"Total Cost: ${total_cost:,.2f}")
+print(f"Average Execution Price: ${avg_execution_price:.2f}")
+print(f"Market Average Price: ${market_avg_price:.2f}")
+print(f"Implementation Shortfall: ${avg_execution_price - market_avg_price:.2f} per share")
+
+# Market Making Summary
+print("\nMarket Making Trades:")
+for trade in market_making_trades[-10:]:  # Show last 10 trades
+    print(f"{trade[0]} | {trade[1]} | {trade[2]:.2f} | {trade[3]} shares")

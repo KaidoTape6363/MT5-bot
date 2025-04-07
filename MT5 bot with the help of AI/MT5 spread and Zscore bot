@@ -1,0 +1,68 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import requests
+import io
+
+# Load historical data for stock 1
+url_stock1 = "https://docs.google.com/spreadsheets/d/1kq9kMYoIQDyWGjmMYHdTWxobyAtVwyjrzNlscGusFw0/export?format=csv"
+response1 = requests.get(url_stock1)
+data_stock1 = pd.read_csv(io.StringIO(response1.text))
+data_stock1['Date'] = pd.to_datetime(data_stock1['Date'])
+data_stock1.set_index('Date', inplace=True)
+
+# Load historical data for stock 2
+url_stock2 = "https://docs.google.com/spreadsheets/d/16Gtg7MhiuFQGHBAsF8MT2YmPm0eeQA8bBGkjcorerso/export?format=csv"
+response2 = requests.get(url_stock2)
+data_stock2 = pd.read_csv(io.StringIO(response2.text))
+data_stock2['Date'] = pd.to_datetime(data_stock2['Date'])
+data_stock2.set_index('Date', inplace=True)
+
+# Merge both dataframes on Date
+data = data_stock1[['Close']].rename(columns={'Close': 'Stock1'}).join(
+    data_stock2[['Close']].rename(columns={'Close': 'Stock2'}), how='inner'
+)
+
+# Calculate Spread & Z-Score
+spread = data['Stock1'] - data['Stock2']
+mean_spread = spread.rolling(window=50).mean()  # 50-day moving average
+std_spread = spread.rolling(window=50).std()  # 50-day standard deviation
+data['Z_Score'] = (spread - mean_spread) / std_spread
+
+# Define trading signals based on Z-score thresholds
+data['Long'] = data['Z_Score'] < -2  # Long entry when Z-score < -2
+data['Short'] = data['Z_Score'] > 2  # Short entry when Z-score > 2
+data['Exit'] = (data['Z_Score'] > -0.5) & (data['Z_Score'] < 0.5)  # Exit when Z-score normalizes
+
+# Plot Stock Prices and Z-Score
+fig, ax1 = plt.subplots(figsize=(14, 7))
+
+# Stock Prices Plot
+ax1.set_xlabel('Date')
+ax1.set_ylabel('Stock Prices')
+ax1.plot(data.index, data['Stock1'], label='Stock 1 Price', color='blue', alpha=0.7)
+ax1.plot(data.index, data['Stock2'], label='Stock 2 Price', color='red', alpha=0.7)
+ax1.tick_params(axis='y')
+ax1.legend(loc='upper left')
+
+# Add Z-Score on Secondary Y-Axis
+ax2 = ax1.twinx()
+ax2.set_ylabel('Z-Score')
+ax2.plot(data.index, data['Z_Score'], label='Z-Score', color='black', linestyle='dashed')
+ax2.axhline(2, color='green', linestyle='dotted', label='Overbought (+2)')
+ax2.axhline(-2, color='purple', linestyle='dotted', label='Oversold (-2)')
+ax2.axhline(0, color='gray', linestyle='dotted', alpha=0.5)
+
+# Plot buy/sell signals
+ax1.scatter(data.index[data['Long']], data['Stock1'][data['Long']], marker='^', color='green', label='Buy Signal')
+ax1.scatter(data.index[data['Short']], data['Stock1'][data['Short']], marker='v', color='red', label='Sell Signal')
+
+ax2.legend(loc='upper right')
+
+plt.title('Stock Prices vs Z-Score Trading Signals')
+plt.show()
+
+# Print the last 200 rows of Z-Score & Signals
+pd.set_option('display.max_rows', 200)  # Show full output
+print(data[['Z_Score', 'Long', 'Short', 'Exit']].tail(200))
+
